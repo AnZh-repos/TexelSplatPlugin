@@ -1,0 +1,232 @@
+#include "/Engine/Public/Platform.ush"
+
+float4x4 ScreenToWorld;
+float4x4 WorldToClip;
+float4 CameraPos;
+float4 GridOrigin;
+float4 PrevOrigin;
+float4 PreViewTranslation;
+float CrossfadeTimer;
+
+// Matched to C++ FInverseRotationMatrix * ViewAxisSwap face setup
+float3 GetCubemapDirection(float2 UV, uint Face)
+{
+    float u = UV.x * 2.0 - 1.0;
+    float v = -(UV.y * 2.0 - 1.0);
+    if (Face == 0)
+        return normalize(float3(1, u, v)); // +X
+    if (Face == 1)
+        return normalize(float3(-1, -u, v)); // -X
+    if (Face == 2)
+        return normalize(float3(-u, 1, v)); // +Y
+    if (Face == 3)
+        return normalize(float3(u, -1, v)); // -Y
+    if (Face == 4)
+        return normalize(float3(-u, -v, 1)); // +Z 
+    if (Face == 5)
+        return normalize(float3(-u, v, -1)); // -Z
+    return float3(0, 0, 0);
+}
+
+float3 LinearSRGBToOKLab(float3 c)
+{
+    float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6896926207 * c.b; // s-row blue
+    float l_ = pow(abs(l), 1.0 / 3.0) * sign(l);
+    float m_ = pow(abs(m), 1.0 / 3.0) * sign(m);
+    float s_ = pow(abs(s), 1.0 / 3.0) * sign(s);
+    return float3(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_);
+}
+
+float3 OKLabToLinearSRGB(float3 c)
+{
+    float l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    float m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    float s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+    float l = l_ * l_ * l_;
+    float m = m_ * m_ * m_;
+    float s = s_ * s_ * s_;
+    return float3(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+       -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+       -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+}
+
+Texture2DArray<float4> ProbeAlbedoIn;
+Texture2DArray<float4> ProbeNormalIn;
+Texture2DArray<float> ProbeRadialIn;
+Texture2DArray<float4> ProbeLitIn;
+RWTexture2DArray<float4> ProbeLitOut;
+
+[numthreads(8, 8, 1)]
+void ShadingCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    if (ThreadId.x >= 384 || ThreadId.y >= 384 || ThreadId.z >= 18)
+        return;
+
+    float4 Albedo = ProbeAlbedoIn.Load(int4(ThreadId, 0));
+    float4 NormalRaw = ProbeNormalIn.Load(int4(ThreadId, 0));
+
+    float3 Normal = normalize(NormalRaw.xyz * 2.0 - 1.0);
+    float3 LightDir = normalize(float3(-0.17, 0.17, 1.0));
+    float NdotL = saturate(dot(Normal, LightDir));
+    
+    float ambient = 0.2;
+
+    float3 LitRGB = Albedo.rgb * (NdotL + ambient);
+    float3 OKLab = LinearSRGBToOKLab(LitRGB);
+    OKLab.x = floor(OKLab.x * 32.0 + 0.5) / 32.0; // round-to-nearest, 32 bands
+
+    ProbeLitOut[ThreadId] = float4(saturate(OKLabToLinearSRGB(OKLab)), 1.0);
+}
+
+void SplatVS(
+    uint VertexId : SV_VertexID,
+    uint InstanceId : SV_InstanceID,
+    out float4 OutPosition : SV_Position,
+    out float4 OutColor : TEXCOORD0,
+    nointerpolation out uint OutProbeIndex : TEXCOORD1)
+{
+    uint x = InstanceId % 384;
+    uint y = (InstanceId / 384) % 384;
+    uint slice = InstanceId / (384 * 384);
+
+    uint3 TexelCoord = uint3(x, y, slice);
+    uint FaceIndex = slice % 6;
+    uint ProbeIndex = slice / 6;
+    OutProbeIndex = ProbeIndex;
+
+    float RadialDepth = ProbeRadialIn.Load(int4(TexelCoord, 0));
+
+    if (RadialDepth <= 0.0 || RadialDepth >= 65000.0)
+    {
+        OutPosition = float4(0.0 / 0.0, 0, 0, 0); // NaN discard
+        OutColor = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // Discard eye probe texels closer than 12 UU to avoid capturing player geometry.
+    if (RadialDepth < 12.0)
+    {
+        OutPosition = float4(0.0 / 0.0, 0, 0, 0);
+        OutColor = float4(0, 0, 0, 0);
+        return;
+    }
+
+    OutColor = ProbeLitIn.Load(int4(TexelCoord, 0));
+
+    float4 NormalRaw = ProbeNormalIn.Load(int4(TexelCoord, 0));
+    float3 Normal = normalize(NormalRaw.xyz * 2.0 - 1.0);
+
+    float3 ProbeOriginAbs = CameraPos.xyz;
+    if (ProbeIndex == 1)
+        ProbeOriginAbs = GridOrigin.xyz;
+    else if (ProbeIndex == 2)
+        ProbeOriginAbs = PrevOrigin.xyz;
+
+    float2 UV = (float2(x, y) + 0.5) / 384.0;
+    float3 r = GetCubemapDirection(UV, FaceIndex);
+    float r_inf = max(abs(r.x), max(abs(r.y), abs(r.z)));
+
+    // World position reconstruction: p = o + (d / ||r||_inf) * r
+    float3 WorldPosAbs = ProbeOriginAbs + (RadialDepth / r_inf) * r;
+
+    // Per-face tangent basis — matched to C++ FInverseRotationMatrix * ViewAxisSwap
+    float3 FaceRight, FaceUp;
+    if (FaceIndex == 0)
+    {
+        FaceRight = float3(0, 1, 0);
+        FaceUp = float3(0, 0, 1);
+    }
+    else if (FaceIndex == 1)
+    {
+        FaceRight = float3(0, -1, 0);
+        FaceUp = float3(0, 0, 1);
+    }
+    else if (FaceIndex == 2)
+    {
+        FaceRight = float3(-1, 0, 0);
+        FaceUp = float3(0, 0, 1);
+    }
+    else if (FaceIndex == 3)
+    {
+        FaceRight = float3(1, 0, 0);
+        FaceUp = float3(0, 0, 1);
+    }
+    else if (FaceIndex == 4)
+    {
+        FaceRight = float3(-1, 0, 0);
+        FaceUp = float3(0, -1, 0);
+    }
+    else if (FaceIndex == 5)
+    {
+        FaceRight = float3(-1, 0, 0);
+        FaceUp = float3(0, 1, 0);
+    }
+
+    float cosTheta = max(abs(dot(r, Normal)), 0.15);
+    float tanTheta = sqrt(1.0 - cosTheta * cosTheta) / cosTheta;
+    
+    // Reduced base and cap to prevent grazing angle shelves
+    float GapFillMult = min(1.15 + (0.05 * tanTheta), 2.0);
+
+    float BaseTexelSize = (2.0 / 384.0) * RadialDepth;
+    float Radius = BaseTexelSize * 0.5 * GapFillMult;
+
+    uint LocalVertexId = VertexId % 6;
+    float2 Offsets[6] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, -1), float2(1, 1), float2(-1, 1) };
+    float2 Offset = Offsets[LocalVertexId];
+
+    WorldPosAbs += (FaceRight * Offset.x * Radius) + (FaceUp * Offset.y * Radius);
+
+    // Convert absolute world pos to translated world space before clip transform
+    float3 TranslatedWorldPos = WorldPosAbs + PreViewTranslation.xyz;
+    float4 ClipPos = mul(float4(TranslatedWorldPos, 1.0), WorldToClip);
+
+    // Discard quads behind or on the camera near plane
+    if (ClipPos.w <= 0.001)
+    {
+        OutPosition = float4(0.0 / 0.0, 0, 0, 0);
+        OutColor = float4(0, 0, 0, 0);
+        return;
+    }
+
+    // Depth bias in clip space. Reversed-Z: higher DeviceZ = closer to camera.
+    // Grid wins (no bias). Eye loses to Grid. Prev loses to Grid.
+    if (ProbeIndex == 0)
+        ClipPos.z -= 0.002 * ClipPos.w; // Eye loses
+    else if (ProbeIndex == 2)
+        ClipPos.z -= 0.001 * ClipPos.w; // Prev loses
+
+    OutPosition = ClipPos;
+}
+
+void SplatPS(
+    float4 InPosition : SV_Position,
+    float4 InColor : TEXCOORD0,
+    nointerpolation uint InProbeIndex : TEXCOORD1,
+    out float4 OutColor : SV_Target0)
+{
+    static const float bayerMatrix[16] =
+    {
+        0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0,
+       12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0,
+        3.0 / 16.0, 11.0 / 16.0, 1.0 / 16.0, 9.0 / 16.0,
+       15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0
+    };
+
+    uint2 px = uint2(InPosition.xy) % 4;
+    float bayer = bayerMatrix[px.y * 4 + px.x];
+    float BlendProg = saturate(CrossfadeTimer / 0.5);
+
+    if (InProbeIndex == 1 && bayer > BlendProg)
+        discard;
+    if (InProbeIndex == 2 && bayer <= BlendProg)
+        discard;
+
+    OutColor = float4(InColor.rgb, InColor.a);
+}

@@ -1,0 +1,57 @@
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+void MainVS(
+    FVertexFactoryInput Input,
+    out FVertexFactoryInterpolantsVSToPS Interpolants,
+    out float3 OutTranslatedWorldPos : TEXCOORD8,
+    out float4 OutPosition : SV_Position
+)
+{
+    ResolvedView = ResolveView();
+    FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+    float4 TranslatedWorldPos = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+    float3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);
+
+    FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, TranslatedWorldPos.xyz, TangentToLocal);
+    Interpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+
+    OutTranslatedWorldPos = TranslatedWorldPos.xyz;
+    OutPosition = mul(TranslatedWorldPos, ResolvedView.TranslatedWorldToClip);
+}
+
+void MainPS(
+    FVertexFactoryInterpolantsVSToPS Interpolants,
+    float3 InTranslatedWorldPos : TEXCOORD8,
+    in float4 SvPosition : SV_Position,
+    out float4 OutAlbedo : SV_Target0,
+    out float4 OutNormal : SV_Target1,
+    out float OutRadial : SV_Target2,
+    out uint OutEid : SV_Target3
+)
+{
+    ResolvedView = ResolveView();
+    FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
+    FPixelMaterialInputs PixelMaterialInputs;
+    CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, SvPosition, true);
+
+    float3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+    
+    // Clamp to avoid pure black surfaces dropping out of shading
+    BaseColor = max(BaseColor, float3(0.05, 0.05, 0.05));
+
+    float3 Normal = MaterialParameters.WorldNormal;
+
+    // DFDemote() casts FDFVector3 (LWC double-float) to float3
+    float3 AbsoluteWorldPos = InTranslatedWorldPos - DFDemote(ResolvedView.PreViewTranslation);
+    
+    // Chebyshev depth relative to this face's probe origin
+    float3 Diff = AbsoluteWorldPos - DFDemote(ResolvedView.WorldCameraOrigin);
+    float ChebyshevDepth = max(abs(Diff.x), max(abs(Diff.y), max(abs(Diff.z), 0.0001)));
+
+    OutAlbedo = float4(BaseColor, 1.0);
+    OutNormal = float4(Normal * 0.5 + 0.5, 1.0);
+    OutRadial = ChebyshevDepth;
+    OutEid = 1;
+}
