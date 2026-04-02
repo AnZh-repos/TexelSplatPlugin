@@ -32,6 +32,14 @@ Three-probe system (Eye / Grid / Prev) with 100 UU grid step and 4×4 Bayer cros
 - Disable Nanite on any mesh you want captured - Nanite meshes bypass `PrimitiveSceneInfo->StaticMeshes`. Keep "Generate Nanite Fallback Meshes" enabled in Project Settings.
 - Visual Studio 2026: two engine source files need manual edits before building - `VCEnvironment.cs` line 502: `Compiler = WindowsCompiler.VisualStudio2026;` and `DatasmithMax2017.Target.cs` line 43: `WindowsPlatform.Compiler = WindowsCompiler.Default;`
 
+## Engineering notes
+
+Two findings, neither documented publicly for UE5.7.
+
+**Translated World Space bug.** UE5's `GetTranslatedViewProjectionMatrix()` returns `TranslatedWorldToClip`, not a standard world-to-clip matrix. It expects positions already offset by `PreViewTranslation` - passing absolute world positions displaces every vertex by the full camera-to-origin offset. The symptom was all splats collapsing into a flat shape at a fixed world position regardless of camera movement. Fixed in `SplatVS` by adding `PreViewTranslation.xyz` before the `mul()` call. The matrix name gives no indication this is required.
+
+**Stack allocation + deferred draw commands.** `FMeshMaterialShaderElementData` declared on the stack inside `AddMeshBatch` causes the last processed mesh to render with garbage material data. `DrawDynamicMeshPass` queues commands for deferred execution - by GPU draw time the stack frame is gone and later iterations have overwritten the memory. Three separate RDG barrier approaches failed to fix it before the root cause was identified. Fix is heap allocation; not yet applied (see Status).
+
 ## Setup
 
 Copy the `TexelSplatPlugin` folder into your project's `Plugins/` directory and rebuild. The plugin registers automatically via `PostConfigInit`.
