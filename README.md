@@ -2,6 +2,13 @@
 
 UE5 plugin implementing real-time 3D pixel art via texel splatting, based on Ebert 2026 ([arXiv 2603.14587](https://arxiv.org/abs/2603.14587)).
 
+<table>
+  <tr>
+    <td><img src="screenshots/1-texel-off.png"/></td>
+    <td><img src="screenshots/1-texel-on.png"/></td>
+  </tr>
+</table>
+
 ## What it does
 
 Scene geometry is rasterized into a cubemap array from fixed world-space probe origins. Each cubemap texel is shaded in a compute pass and splatted to screen as a world-space quad. Because pixel assignment is tied to probe position rather than camera position, the result is stable under camera rotation and translation thus no pixel crawl.
@@ -17,7 +24,7 @@ Three-probe system (Eye / Grid / Prev) with 100 UU grid step and 4×4 Bayer cros
 ## Requirements
 
 - UE5.7 source build - private engine headers (`FSceneRenderer`, `FMeshPassProcessor` internals) are required and not shipped with the installed build.
-- The plugin hooks into the deferred rendering path and requires `r.AntiAliasing.Method 0` (TSR off) for clean output.
+- The plugin hooks into the deferred rendering path and requires `r.AntiAliasingMethod 0` (TSR off) for clean output.
 - Disable Nanite on any mesh you want captured - Nanite meshes bypass `PrimitiveSceneInfo->StaticMeshes`. Keep "Generate Nanite Fallback Meshes" enabled in Project Settings.
 - Visual Studio 2026: two engine source files need manual edits before building - `VCEnvironment.cs` line 502: `Compiler = WindowsCompiler.VisualStudio2026;` and `DatasmithMax2017.Target.cs` line 43: `WindowsPlatform.Compiler = WindowsCompiler.Default;`
 
