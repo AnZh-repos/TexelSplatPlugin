@@ -7,23 +7,9 @@ UE5 plugin implementing real-time 3D pixel art via texel splatting, based on Ebe
     <td><img src="screenshots/1-texel-off.png"/></td>
     <td><img src="screenshots/1-texel-on.png"/></td>
   </tr>
-</table>
-<table>
-  <tr>
-    <td><img src="screenshots/2-texel-off.png"/></td>
-    <td><img src="screenshots/2-texel-on.png"/></td>
-  </tr>
-</table>
-<table>
-  <tr>
+    <tr>
     <td><img src="screenshots/3-texel-off.png"/></td>
     <td><img src="screenshots/3-texel-on.png"/></td>
-  </tr>
-</table>
-<table>
-  <tr>
-    <td><img src="screenshots/4-texel-off.png"/></td>
-    <td><img src="screenshots/4-texel-on.png"/></td>
   </tr>
 </table>
 
