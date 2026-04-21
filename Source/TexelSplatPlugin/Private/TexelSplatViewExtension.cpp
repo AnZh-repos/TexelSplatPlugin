@@ -59,17 +59,35 @@ public:
 
     virtual void AddMeshBatch(const FMeshBatch& RESTRICT MeshBatch, uint64 BatchElementMask, const FPrimitiveSceneProxy* RESTRICT PrimitiveSceneProxy, int32 StaticMeshId = -1) override
     {
+        if (MeshBatch.VertexFactory->GetType() != &FLocalVertexFactory::StaticType)
+            return;
+
         const FMaterialRenderProxy* MaterialProxy = MeshBatch.MaterialRenderProxy;
         if (!MaterialProxy) return;
 
         const FMaterialRenderProxy* FallbackProxyLocal = nullptr;
         const FMaterial& Material = MaterialProxy->GetMaterialWithFallback(FeatureLevel, FallbackProxyLocal);
-        const FMaterialRenderProxy& EffectiveProxy = FallbackProxyLocal ? *FallbackProxyLocal : *MaterialProxy;
-
-        if (Material.GetMaterialDomain() != MD_Surface || Material.GetBlendMode() != BLEND_Opaque)
+        if (FallbackProxyLocal)
         {
+            static TSet<FString> LoggedMaterials;
+            FString MatName = MaterialProxy->GetFriendlyName();
+            if (!LoggedMaterials.Contains(MatName))
+            {
+                LoggedMaterials.Add(MatName);
+                const FMaterial* NoFallbackMat = MaterialProxy->GetMaterialNoFallback(FeatureLevel);
+                if (NoFallbackMat)
+                {
+                    FMaterialShaderMap* Map = NoFallbackMat->GetRenderingThreadShaderMap();
+                    if (Map)
+                        Map->IsComplete(NoFallbackMat, false);
+                }
+            }
             return;
         }
+        const FMaterialRenderProxy& EffectiveProxy = *MaterialProxy;
+
+        if (Material.GetMaterialDomain() != MD_Surface || Material.GetBlendMode() != BLEND_Opaque)
+            return;
 
         FVertexFactoryType* VFType = MeshBatch.VertexFactory->GetType();
 
@@ -80,18 +98,7 @@ public:
         const FMaterialRenderProxy* FinalProxy = &EffectiveProxy;
 
         if (!VertexShader.IsValid() || !PixelShader.IsValid())
-        {
-            if (!FallbackProxy) return;
-
-            FinalProxy = FallbackProxy;
-            const FMaterialRenderProxy* TempFallbackProxy = nullptr;
-            FinalMaterial = &FinalProxy->GetMaterialWithFallback(FeatureLevel, TempFallbackProxy);
-
-            VertexShader = FinalMaterial->GetShader<FTexelSplatCaptureVS>(VFType, 0, false);
-            PixelShader = FinalMaterial->GetShader<FTexelSplatCapturePS>(VFType, 0, false);
-
-            if (!VertexShader.IsValid() || !PixelShader.IsValid()) return;
-        }
+            return;
 
         FTexelSplatCapturePassShaders PassShaders;
         PassShaders.VertexShader = VertexShader;
@@ -103,18 +110,9 @@ public:
         const FMeshDrawCommandSortKey SortKey = FMeshDrawCommandSortKey::Default;
 
         BuildMeshDrawCommands(
-            MeshBatch,
-            BatchElementMask,
-            PrimitiveSceneProxy,
-            *FinalProxy,
-            *FinalMaterial,
-            PassDrawRenderState,
-            PassShaders,
-            FM_Solid,
-            CM_None,
-            SortKey,
-            EMeshPassFeatures::Default,
-            ShaderElementData
+            MeshBatch, BatchElementMask, PrimitiveSceneProxy,
+            *FinalProxy, *FinalMaterial, PassDrawRenderState, PassShaders,
+            FM_Solid, CM_None, SortKey, EMeshPassFeatures::Default, ShaderElementData
         );
     }
 
@@ -161,6 +159,10 @@ void FTexelSplatViewExtension::PostRenderBasePassDeferred_RenderThread(
     }
 
     if (!InView.bIsViewInfo || !InView.Family || !InView.Family->Scene) return;
+    
+    UWorld* World = InView.Family->Scene->GetWorld();
+    if (!World || World->WorldType == EWorldType::EditorPreview || World->WorldType == EWorldType::Inactive)
+        return;
 
     FViewInfo* MainViewInfo = (FViewInfo*)&InView;
     if (!MainViewInfo->CachedViewUniformShaderParameters) return;
@@ -299,10 +301,9 @@ void FTexelSplatViewExtension::PostRenderBasePassDeferred_RenderThread(
                                     for (int32 MeshIndex = 0; MeshIndex < PrimitiveSceneInfo->StaticMeshes.Num(); MeshIndex++)
                                     {
                                         const FStaticMeshBatch& StaticMesh = PrimitiveSceneInfo->StaticMeshes[MeshIndex];
-                                        if (StaticMesh.MaterialRenderProxy)
-                                        {
-                                            MeshProcessor.AddMeshBatch(StaticMesh, ~0ull, PrimitiveSceneInfo->Proxy);
-                                        }
+                                        if (!StaticMesh.MaterialRenderProxy) continue;
+                                        if (StaticMesh.MaterialRenderProxy == FallbackMaterialProxy) continue;
+                                        MeshProcessor.AddMeshBatch(StaticMesh, ~0ull, PrimitiveSceneInfo->Proxy, StaticMesh.Id);
                                     }
                                 }
                             }
